@@ -3,60 +3,83 @@ ROOT=/ssd/hust-tangxi/workspace/MOR
 source ${ROOT}/.venv/bin/activate
 which python
 
-export CUDA_VISIBLE_DEVICES="2,3"
-export NCCL_IB_DISABLE=1        # 完全禁用 IB/RoCE
+export CUDA_VISIBLE_DEVICES="1"
+export NCCL_IB_DISABLE=1
 
+dataset_name=Amazon-Reviews-2023
 # * Industrial_and_Scientific Office_Products All_Beauty
 domain=All_Beauty
-# * Qwen3.5-0.8B Qwen2.5-Coder-7B
-model_name=Qwen2.5-Coder-0.5B
+# * Qwen3.5-0.8B Qwen2.5-Coder-7B 
+model_name=Qwen3.5-0.8B 
+# * Qwen3-VL-Embedding-2B Qwen3-Embedding-0.6B
+embedding_model_name=Qwen3-Embedding-0.6B
+
+black ${ROOT}/src
 
 run_prepare() {
-    cd ${ROOT}/data
-    black amazon23_data_process.py
-    # python amazon23_data_process.py \
-    #     --dataset ${domain} \
-    #     --metadata_file ${ROOT}/data/Amazon-Reviews-2023/raw/meta_categories/meta_${domain}.jsonl \
-    #     --reviews_file ${ROOT}/data/Amazon-Reviews-2023/raw/review_categories/${domain}.jsonl \
-    #     --user_k 5 \
-    #     --st_year 2018 \
-    #     --st_month 10 \
-    #     --ed_year 2023 \
-    #     --ed_month 9 \
-    #     --output_path ${ROOT}/data/Amazon23
-    # wait
-    
+    cd ${ROOT}/src/data
+    python amazon_data_process.py \
+        --dataset ${domain} \
+        --metadata_file ${ROOT}/data/${dataset_name}/raw/meta_categories/meta_${domain}.jsonl \
+        --reviews_file ${ROOT}/data/${dataset_name}/raw/review_categories/${domain}.jsonl \
+        --user_k 5 \
+        --st_year 2018 \
+        --st_month 10 \
+        --ed_year 2023 \
+        --ed_month 9 \
+        --output_path ${ROOT}/data/${dataset_name}/splited/${domain}
+    wait
+
     # * 生成嵌入
-    cd ${ROOT}/rq/text2emb
-    black amazon_textimg2emb.py
+    export VLLM_WORKER_MULTIPROC_METHOD="spawn"
+    export VLLM_ATTENTION_BACKEND="TORCH_SDPA"
+    cd ${ROOT}/src/residual_quantization/item_embedding
     python amazon_textimg2emb.py \
         --dataset ${domain} \
-        --root ${ROOT}/data/Amazon23/${domain} \
-        --plm_checkpoint ${ROOT}/data/emb_models/Qwen3-VL-Embedding-8B \
+        --plm_name ${embedding_model_name} \
+        --root ${ROOT}/data/${dataset_name}/splited/${domain} \
+        --plm_checkpoint ${ROOT}/pretrained-models/${embedding_model_name} \
         --batch_size 64
     wait
 }
 
 run_rqvae() {
-    ckpt_dir=${ROOT}/data/Amazon23/${domain}/${domain}-RQ-VAE
-    # rm -rf ${ckpt_dir}
-    mkdir -p ${ckpt_dir}
+    output_dir=/ssd/hust-tangxi/workspace/MOR/saved_models/RQ-VAE/${dataset_name}/${domain}
+    # rm -rf ${output_dir}
+    mkdir -p ${output_dir}
     
+    cd ${ROOT}/src/residual_quantization/CF/LightGCN-PyTorch/code
+    python main.py \
+        --decay=1e-4 \
+        --lr=0.001 \
+        --layer=3 \
+        --seed=2026 \
+        --dataset="amazon-book" \
+        --topks="[20]" \
+        --recdim=64 \
+        --path="$output_dir/LightGCN" \
+        --bpr_batch=8192 \
+        --epochs=100
+    wait
+
+    exit
+
     # * 优化 RQ-VAE: 残差量化自编码器
-    cd ${ROOT}/rq
-    black ${ROOT}/rq
-    python rqvae.py \
-      --data_path ${ROOT}/data/Amazon23/${domain}/${domain}.emb-qwen-td.npy \
-      --ckpt_dir ${ckpt_dir} \
+    cd ${ROOT}/src/residual_quantization
+    python train_rqvae.py \
+      --data_path ${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.emb-${embedding_model_name}-td.npy \
+      --output_dir ${output_dir} \
       --lr 1e-3 \
       --epochs 10000 \
       --batch_size 20480 \
       --eval_step 50
     wait
+
+    exit
     
     # * 对 Title 生成 SID
     python generate_indices.py \
-      --ckpt_path ${ckpt_dir}/best_collision_model.pth \
+      --ckpt_path ${output_dir}/best_collision_model.pth \
       --output_path ${ROOT}/data/Amazon23/${domain}/${domain}.index.json
     wait
     
