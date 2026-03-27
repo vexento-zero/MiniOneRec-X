@@ -1,5 +1,6 @@
 data/
 datasets/
+__pycache__/
 saved_models/
 pretrained-models/
 src/residual_quantization/CF/LightGCN-PyTorch/data/amazon-book
