@@ -46,6 +46,7 @@ class RQVAE(nn.Module):
         self.sk_iters = sk_iters
 
         self.encode_layer_dims = [self.in_dim] + self.layers + [self.e_dim]
+
         self.encoder = MLPLayers(
             layers=self.encode_layer_dims, dropout=self.dropout_prob, bn=self.bn
         )
@@ -53,10 +54,10 @@ class RQVAE(nn.Module):
         self.rq = ResidualVectorQuantizer(
             num_emb_list,
             e_dim,
+            self.sk_epsilons,
             beta=self.beta,
             kmeans_init=self.kmeans_init,
             kmeans_iters=self.kmeans_iters,
-            sk_epsilons=self.sk_epsilons,
             sk_iters=self.sk_iters,
         )
 
@@ -71,7 +72,7 @@ class RQVAE(nn.Module):
 
         out = self.decoder(x_q)
 
-        return out, rq_loss, indices
+        return out, x_q, rq_loss, indices
 
     @torch.no_grad()
     def get_indices(self, xs, use_sk=False):

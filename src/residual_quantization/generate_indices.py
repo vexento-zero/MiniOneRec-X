@@ -8,9 +8,11 @@ from time import time
 from torch import optim
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from datasets import EmbDataset
+from datasets import EmbDataset, JointEmbInterDataset
 from models.rqvae import RQVAE
+from models.joint_cf_rqvae import JointCFRQVAE
 import os
+from rich_logger import logger
 
 
 def check_collision(all_indices_str):
@@ -65,32 +67,61 @@ def main():
     ckpt_args = ckpt["args"]
     state_dict = ckpt["state_dict"]
 
-    data = EmbDataset(ckpt_args.data_path)
+    config = {
+        "rqvae": {
+            "num_emb_list": ckpt_args.num_emb_list,
+            "e_dim": ckpt_args.e_dim,
+            "layers": ckpt_args.rqvae_layers,
+            "dropout_prob": ckpt_args.dropout_prob,
+            "bn": ckpt_args.bn,
+            "loss_type": ckpt_args.loss_type,
+            "quant_loss_weight": ckpt_args.quant_loss_weight,
+            "beta": ckpt_args.beta,
+            "kmeans_init": ckpt_args.kmeans_init,
+            "kmeans_iters": ckpt_args.kmeans_iters,
+            "sk_epsilons": ckpt_args.sk_epsilons,
+            "sk_iters": ckpt_args.sk_iters,
+        },
+        "lightgcn": {
+            "latent_dim_rec": ckpt_args.latent_dim_rec,
+            "lightGCN_n_layers": ckpt_args.lightGCN_n_layers,
+            "keep_prob": ckpt_args.keep_prob,
+            "A_split": ckpt_args.A_split,
+            "pretrain": ckpt_args.pretrain,
+            "dropout": ckpt_args.lgcn_dropout,
+        },
+        "train": {
+            "epochs": ckpt_args.epochs,
+            "batch_size": ckpt_args.batch_size,
+            "lr": ckpt_args.lr,
+            "weight_decay": ckpt_args.weight_decay,
+            "early_stop_patience": ckpt_args.early_stop_patience,
+        },
+        "test": {
+            "batch_size": ckpt_args.batch_size,
+        },
+    }
 
-    model = RQVAE(
-        in_dim=data.dim,
-        num_emb_list=ckpt_args.num_emb_list,
-        e_dim=ckpt_args.e_dim,
-        layers=ckpt_args.layers,
-        dropout_prob=ckpt_args.dropout_prob,
-        bn=ckpt_args.bn,
-        loss_type=ckpt_args.loss_type,
-        quant_loss_weight=ckpt_args.quant_loss_weight,
-        kmeans_init=ckpt_args.kmeans_init,
-        kmeans_iters=ckpt_args.kmeans_iters,
-        sk_epsilons=ckpt_args.sk_epsilons,
-        sk_iters=ckpt_args.sk_iters,
+    joint_emb_inter_dataset = JointEmbInterDataset(
+        interaction_path=ckpt_args.interaction_path,
+        emb_path=ckpt_args.emb_path,
+        test_ratio=ckpt_args.test_ratio,
+        seed=ckpt_args.seed,
+        split=ckpt_args.A_split,
+        folds=100,
     )
 
+    model = JointCFRQVAE(config, joint_emb_inter_dataset, sid_type=ckpt_args.sid_type)
     model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
     print(model)
 
+    data = EmbDataset(ckpt_args.emb_path)
     data_loader = DataLoader(
         data,
-        num_workers=ckpt_args.num_workers,
-        batch_size=args.batch_size,
+        num_workers=10,
+        batch_size=ckpt_args.batch_size,
         shuffle=False,
         pin_memory=True,
     )
@@ -99,9 +130,9 @@ def main():
     all_indices_str = []
     prefix = ["<a_{}>", "<b_{}>", "<c_{}>", "<d_{}>", "<e_{}>"]
 
-    for d in tqdm(data_loader):
+    for d in tqdm(data_loader, ncols=100, desc=f"Generating Indices"):
         d = d.to(device)
-        indices = model.get_indices(d, use_sk=False)
+        indices = model.rqvae.get_indices(d, use_sk=False)
         indices = indices.view(-1, indices.shape[-1]).cpu().numpy()
         for index in indices:
             code = []
@@ -114,11 +145,11 @@ def main():
     all_indices = np.array(all_indices)
     all_indices_str = np.array(all_indices_str)
 
-    for vq in model.rq.vq_layers[:-1]:
+    for vq in model.rqvae.rq.vq_layers[:-1]:
         vq.sk_epsilon = 0.0
 
-    if model.rq.vq_layers[-1].sk_epsilon == 0.0:
-        model.rq.vq_layers[-1].sk_epsilon = 0.003
+    if model.rqvae.rq.vq_layers[-1].sk_epsilon == 0.0:
+        model.rqvae.rq.vq_layers[-1].sk_epsilon = 0.003
 
     tt = 0
     while True:
@@ -131,7 +162,7 @@ def main():
         for collision_items in collision_item_groups:
             d = data[collision_items].to(device)
 
-            indices = model.get_indices(d, use_sk=True)
+            indices = model.rqvae.get_indices(d, use_sk=True)
             indices = indices.view(-1, indices.shape[-1]).cpu().numpy()
             for item, index in zip(collision_items, indices):
                 code = []

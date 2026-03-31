@@ -14,6 +14,7 @@ from utils import ensure_dir, set_color, get_local_time, delete_file
 import os
 import matplotlib.pyplot as plt
 import heapq
+from rich_logger import logger
 
 
 class Trainer(object):
@@ -30,6 +31,7 @@ class Trainer(object):
         self.weight_decay = args.weight_decay
         self.epochs = args.epochs
         self.warmup_steps = args.warmup_epochs * data_num
+
         self.max_steps = args.epochs * data_num
 
         self.save_limit = args.save_limit
@@ -117,7 +119,7 @@ class Trainer(object):
         for batch_idx, data in enumerate(train_data):
             data = data.to(self.device)
             self.optimizer.zero_grad()
-            out, rq_loss, indices = self.model(data)
+            out, _, rq_loss, indices = self.model(data)
             loss, loss_recon = self.model.compute_loss(out, rq_loss, xs=data)
             self._check_nan(loss)
             loss.backward()
@@ -215,6 +217,7 @@ class Trainer(object):
 
                 valid_start_time = time()
                 collision_rate = self._valid_epoch(data)
+                logger.info(f"epoch = {epoch_idx}, collision_rate = {collision_rate}")
 
                 if train_loss < self.best_loss:
                     self.best_loss = train_loss

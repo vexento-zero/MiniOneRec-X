@@ -129,9 +129,11 @@ if __name__ == "__main__":
         data,
         num_workers=args.num_workers,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         pin_memory=True,
     )
+    from rich_logger import logger
+
     trainer = Trainer(args, model, len(data_loader))
     best_loss, best_collision_rate = trainer.fit(data_loader)
 

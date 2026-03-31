@@ -9,10 +9,12 @@ export NCCL_IB_DISABLE=1
 dataset_name=Amazon-Reviews-2023
 # * Industrial_and_Scientific Office_Products All_Beauty
 domain=All_Beauty
-# * Qwen3.5-0.8B Qwen2.5-Coder-7B 
-model_name=Qwen3.5-0.8B 
+# * Qwen3.5-0.8B Qwen2.5-Coder-7B
+model_name=Qwen2.5-0.5B-Instruct
 # * Qwen3-VL-Embedding-2B Qwen3-Embedding-0.6B
 embedding_model_name=Qwen3-Embedding-0.6B
+# * nocf cf
+sid_type=cf
 
 black ${ROOT}/src
 
@@ -47,62 +49,48 @@ run_rqvae() {
     output_dir=/ssd/hust-tangxi/workspace/MOR/saved_models/RQ-VAE/${dataset_name}/${domain}
     # rm -rf ${output_dir}
     mkdir -p ${output_dir}
-    
-    cd ${ROOT}/src/residual_quantization/CF/LightGCN-PyTorch/code
-    python main.py \
-        --decay=1e-4 \
-        --lr=0.001 \
-        --layer=3 \
-        --seed=2026 \
-        --dataset="amazon-book" \
-        --topks="[20]" \
-        --recdim=64 \
-        --path="$output_dir/LightGCN" \
-        --bpr_batch=8192 \
-        --epochs=100
-    wait
 
-    exit
-
-    # * 优化 RQ-VAE: 残差量化自编码器
+    # * [不用 CF] 联合训练 RQ-VAE 和 LightGCN
     cd ${ROOT}/src/residual_quantization
-    python train_rqvae.py \
-      --data_path ${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.emb-${embedding_model_name}-td.npy \
-      --output_dir ${output_dir} \
-      --lr 1e-3 \
-      --epochs 10000 \
-      --batch_size 20480 \
-      --eval_step 50
-    wait
+    # python train_joint_rqvae.py \
+    #   --interaction_path "${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.inter.json" \
+    #   --emb_path "${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.emb-${embedding_model_name}-td.npy" \
+    #   --epochs 10000 \
+    #   --batch_size 1024 \
+    #   --lr 1e-3 \
+    #   --weight_decay 1e-3 \
+    #   --output_dir ${output_dir}/sid_type-${sid_type} \
+    #   --early_stop_patience 10 \
+    #   --kmeans_init \
+    #   --eval_step 100 \
+    #   --sid_type ${sid_type}
+    # wait
 
-    exit
-    
     # * 对 Title 生成 SID
     python generate_indices.py \
-      --ckpt_path ${output_dir}/best_collision_model.pth \
-      --output_path ${ROOT}/data/Amazon23/${domain}/${domain}.index.json
+      --ckpt_path ${output_dir}/sid_type-${sid_type}/best_model.pth \
+      --output_path ${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.index.${sid_type}.json
     wait
-    
+
     # * 转化为训练所需的格式
-    cd ${ROOT}
-    black convert_dataset.py
+    cd ${ROOT}/src/data
     python convert_dataset.py \
         --dataset_name ${domain} \
-        --data_dir ${ROOT}/data/Amazon23/${domain} \
-        --output_dir ${ROOT}/datasets/Amazon23/${domain}
+        --sid_type ${sid_type} \
+        --data_dir ${ROOT}/data/${dataset_name}/splited/${domain} \
+        --output_dir ${ROOT}/data/${dataset_name}/splited/${domain}
     wait
 }
 
 run_sft() {
     base_model_path=/ssd/hust-tangxi/workspace/pretrained-models/${model_name}
-    dataset_dir=${ROOT}/datasets/Amazon23/${domain}
-    output_dir=${ROOT}/saved_models/${model_name}/Amazon23/${domain}-sft
+    dataset_dir=${ROOT}/data/${dataset_name}/splited/${domain} 
+    output_dir=${ROOT}/saved_models/${model_name}/${dataset_name}/${domain}-sft
     
     n_gpus_per_node=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print NF}')
     
     # * 用监督微调对齐 SID 和语义
     cd ${ROOT}/src
-    black sft.py
     torchrun --nproc_per_node ${n_gpus_per_node} \
         sft.py \
         --base_model ${base_model_path} \
@@ -114,10 +102,10 @@ run_sft() {
         --category ${domain} \
         --train_from_scratch False \
         --seed 42 \
-        --sid_index_path ${ROOT}/data/Amazon23/${domain}/${domain}.index.json \
+        --sid_index_path ${dataset_dir}/${domain}.${sid_type}.index.json \
         --item_meta_path ${ROOT}/data/Amazon23/${domain}/${domain}.item.json \
         --freeze_LLM False \
-        --num_epochs 1
+        --num_epochs 100
     wait
 }
 

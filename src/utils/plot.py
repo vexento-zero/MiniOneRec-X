@@ -29,12 +29,10 @@ def plot_scores(scores, window=10, name="score_curve.png"):
         smooth_y = np.convolve(step_means, kernel, mode="valid")
         smooth_x = np.arange(window - 1, len(step_means))
         ax.plot(smooth_x, smooth_y, color="#2c3e50", lw=2, label=f"Trend (MA-{window})")
-    ax.set_title("Reward Score Distribution and Trend", fontweight="bold")
     ax.set_xlabel("Training Steps")
     ax.set_ylabel("Score")
-    ax.set_ylim(min(0, vals.min()), y_limit * 1.1)
 
-    legend = ax.legend(loc="upper right", frameon=True, shadow=True)
+    legend = ax.legend(loc="best", frameon=True, shadow=True)
     for handle in legend.legend_handles:
         handle.set_alpha(1.0)
 
