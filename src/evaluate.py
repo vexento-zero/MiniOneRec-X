@@ -20,14 +20,13 @@ from LogitProcessor import ConstrainedLogitsProcessor
 from accelerate import Accelerator
 import random
 import bitsandbytes as bnb
+from rich_logger import logger
+import numpy as np
+from pathlib import Path
 
-if torch.cuda.is_available():
-    device = "cuda"
-else:
-    device = "cpu"
+device = "cuda"
 P = 998244353
 MOD = int(1e9 + 9)
-import numpy as np
 
 
 def get_hash(x):
@@ -74,6 +73,7 @@ def main(
     category = category_dict[category]
     print(category)
 
+    logger.info(f"device = {device}")
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype=torch.bfloat16, device_map="auto"
     )
@@ -260,7 +260,7 @@ def main(
     for i in range(BLOCK):
         new_encodings.append(encodings[i * batch_size : (i + 1) * batch_size])
 
-    for idx, encodings in enumerate(tqdm(new_encodings)):
+    for idx, encodings in enumerate(tqdm(new_encodings, desc="Evaluating", ncols=100)):
         # Use standard evaluation
         output = evaluate(
             encodings,
@@ -277,6 +277,8 @@ def main(
     for i in range(len(test_data)):
         if "dedup" in test_data[i]:
             test_data[i].pop("dedup")
+
+    Path(result_json_data).parent.mkdir(parents=True, exist_ok=True)
     with open(result_json_data, "w") as f:
         json.dump(test_data, f, indent=4)
 

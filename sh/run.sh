@@ -47,24 +47,23 @@ run_prepare() {
 
 run_rqvae() {
     output_dir=/ssd/hust-tangxi/workspace/MOR/saved_models/RQ-VAE/${dataset_name}/${domain}
-    # rm -rf ${output_dir}
     mkdir -p ${output_dir}
 
-    # * [不用 CF] 联合训练 RQ-VAE 和 LightGCN
+    # * 联合训练 RQ-VAE 和 LightGCN
     cd ${ROOT}/src/residual_quantization
-    # python train_joint_rqvae.py \
-    #   --interaction_path "${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.inter.json" \
-    #   --emb_path "${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.emb-${embedding_model_name}-td.npy" \
-    #   --epochs 10000 \
-    #   --batch_size 1024 \
-    #   --lr 1e-3 \
-    #   --weight_decay 1e-3 \
-    #   --output_dir ${output_dir}/sid_type-${sid_type} \
-    #   --early_stop_patience 10 \
-    #   --kmeans_init \
-    #   --eval_step 100 \
-    #   --sid_type ${sid_type}
-    # wait
+    python train_joint_rqvae.py \
+      --interaction_path "${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.inter.json" \
+      --emb_path "${ROOT}/data/${dataset_name}/splited/${domain}/${domain}.emb-${embedding_model_name}-td.npy" \
+      --epochs 10000 \
+      --batch_size 1024 \
+      --lr 1e-3 \
+      --weight_decay 1e-3 \
+      --output_dir ${output_dir}/sid_type-${sid_type} \
+      --early_stop_patience 10 \
+      --kmeans_init \
+      --eval_step 100 \
+      --sid_type ${sid_type}
+    wait
 
     # * 对 Title 生成 SID
     python generate_indices.py \
@@ -85,7 +84,7 @@ run_rqvae() {
 run_sft() {
     base_model_path=/ssd/hust-tangxi/workspace/pretrained-models/${model_name}
     dataset_dir=${ROOT}/data/${dataset_name}/splited/${domain} 
-    output_dir=${ROOT}/saved_models/${model_name}/${dataset_name}/${domain}-sft
+    output_dir=${ROOT}/saved_models/${model_name}/${dataset_name}/${domain}-${sid_type}-sft
     
     n_gpus_per_node=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print NF}')
     
@@ -117,7 +116,7 @@ run_rl() {
         --num_processes 2 \
         --main_process_port 29503 \
         rl.py \
-        --model_path ${ROOT}/saved_models/${model_name}/Amazon23/${domain}-sft \
+        --model_path ${ROOT}/saved_models/${model_name}/Amazon23/${domain}-${sid_type}-sft \
         --train_batch_size 128 \
         --eval_batch_size 256 \
         --num_train_epochs 10 \
@@ -147,73 +146,46 @@ run_rl() {
 }
 
 run_test() {
-    cudalist="2 3"
-    batch_size=32
+    batch_size=4
     dataset_dir=${ROOT}/datasets/Amazon23/${domain}
+    # * pretrain sft rl
+    exp_name=pretrain
+
+    # for exp_name in pretrain sft rl
+    if [ "$exp_name" = "pretrain" ]; then
+        model_path=/ssd/hust-tangxi/workspace/pretrained-models/${model_name}
+    else
+        model_path=${ROOT}/saved_models/${model_name}/${dataset_name}/${domain}-${sid_type}-${exp_name}
+    fi
     
-    cd ${ROOT}
+    test_file=${dataset_dir}/test/${domain}.csv
+    info_file=${dataset_dir}/info/${domain}.txt
+    output_dir=${ROOT}/results/${model_name}/${dataset_name}/${domain}-${sid_type}-${exp_name}
+    
+    if [[ ! -f "$test_file" ]] || [[ ! -f "$info_file" ]]; then
+        echo "Error: Test or info file not found for domain $domain"
+        continue
+    fi
 
-    for exp_name in pretrain sft rl
-    do
-        if [ "$exp_name" = "pretrain" ]; then
-            model_path=/ssd/hust-tangxi/workspace/pretrained-models/${model_name}
-        else
-            model_path=${ROOT}/saved_models/${model_name}/Amazon23/${domain}-${exp_name}
-        fi
-        
-        test_file=${dataset_dir}/test/${domain}.csv
-        info_file=${dataset_dir}/info/${domain}.txt
-        
-        if [[ ! -f "$test_file" ]] || [[ ! -f "$info_file" ]]; then
-            echo "Error: Test or info file not found for domain $domain"
-            continue
-        fi
-        
-        temp_dir="${ROOT}/temp/${domain}-${model_name}-${exp_name}"
-        mkdir -p "$temp_dir"
-        
-        python split.py \
-            --input_path ${test_file} \
-            --output_path ${temp_dir} \
-            --cuda_list $(echo $cudalist | tr ' ' ',')
-        
-        for i in ${cudalist}
-        do
-            if [[ -f "$temp_dir/${i}.csv" ]]; then
-                CUDA_VISIBLE_DEVICES=$i python -u evaluate.py \
-                    --base_model "$model_path" \
-                    --info_file "$info_file" \
-                    --category ${domain} \
-                    --test_data_path "$temp_dir/${i}.csv" \
-                    --result_json_data "$temp_dir/${i}.json" \
-                    --batch_size $batch_size \
-                    --num_beams 50 \
-                    --max_new_tokens 256 \
-                    --guidance_scale 1.0 \
-                    --length_penalty 0.0 &
-            fi
-        done
-        wait
-        
-        output_dir="${ROOT}/results/${domain}/${model_name}-${exp_name}"
-        mkdir -p "$output_dir"
-        
-        actual_cuda_list=$(ls "$temp_dir"/*.json 2>/dev/null | sed 's/.*\///g' | sed 's/\.json//g' | tr '\n' ',' | sed 's/,$//')
-        
-        python merge.py \
-            --input_path $temp_dir \
-            --output_path $output_dir/log.json \
-            --cuda_list $actual_cuda_list
-        wait
-        
-        python calc.py \
-            --path $output_dir/log.json \
-            --item_path $info_file \
-            --output_path $output_dir/metric.json
-        wait
-
-        rm -rf ${temp_dir}
-    done
+    cd ${ROOT}/src
+    python -u evaluate.py \
+        --base_model $model_path \
+        --info_file $info_file \
+        --category ${domain} \
+        --test_data_path ${test_file} \
+        --result_json_data $output_dir/log.json \
+        --batch_size $batch_size \
+        --num_beams 50 \
+        --max_new_tokens 256 \
+        --guidance_scale 1.0 \
+        --length_penalty 0.0
+    wait
+    
+    python calc.py \
+        --path $output_dir/log.json \
+        --item_path $info_file \
+        --output_path $output_dir/metric.json
+    wait
 }
 
 # 主函数：根据action参数调用对应函数

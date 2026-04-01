@@ -9,6 +9,9 @@ import numpy as np
 import fire
 import torch
 import transformers
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from pathlib import Path
 from datasets import load_dataset, concatenate_datasets
 from transformers import EarlyStoppingCallback, AutoConfig
 from typing import (
@@ -238,6 +241,74 @@ def process_train_dataset(train_datasets, seed=42):
         hf_train_dataset = cl_combined
 
     return hf_train_dataset
+
+
+class LossPlottingTrainer(transformers.Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.loss_history = []
+        self.eval_loss_history = []
+
+    def log(self, logs, start_time=None):
+        super().log(logs, start_time)
+
+        # logger.info(f"logs = {logs}")
+
+        if "loss" in logs:
+            self.loss_history.append([logs["loss"]])
+
+            if len(self.loss_history) % 10 == 0:
+                self.plot_scores(
+                    self.loss_history,
+                    window=1,
+                    name=os.path.join(self.args.output_dir, "train_loss_curve.png"),
+                )
+
+        if "eval_loss" in logs:
+            self.eval_loss_history.append([logs["eval_loss"]])
+            self.plot_scores(
+                self.eval_loss_history,
+                window=1,
+                name=os.path.join(self.args.output_dir, "eval_loss_curve.png"),
+            )
+
+    def plot_scores(self, scores, window=10, name="score_curve.png"):
+        if len(scores) == 0:
+            return
+        Path(name).parent.mkdir(parents=True, exist_ok=True)
+        plt.style.use("seaborn-v0_8-whitegrid")
+
+        steps = np.concatenate([np.full(len(b), i) for i, b in enumerate(scores)])
+        vals = np.concatenate(scores)
+        step_means = np.array([np.mean(b) for b in scores])
+
+        fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+
+        y_limit = np.percentile(vals, 99)
+        base_rgb = mcolors.to_rgb("#3498db")
+        colors = np.zeros((len(vals), 4))
+        colors[:, :3] = base_rgb
+        colors[:, 3] = np.clip(0.1 + 0.5 * (vals / (y_limit + 1e-6)), 0.05, 0.4)
+
+        ax.scatter(steps, vals, c=colors, s=5, edgecolors="none", label="Sample Score")
+
+        if len(step_means) >= window:
+            kernel = np.ones(window) / window
+            smooth_y = np.convolve(step_means, kernel, mode="valid")
+            smooth_x = np.arange(window - 1, len(step_means))
+            ax.plot(
+                smooth_x, smooth_y, color="#2c3e50", lw=2, label=f"Trend (MA-{window})"
+            )
+        ax.set_xlabel("Training Steps")
+        ax.set_ylabel("Score")
+
+        legend = ax.legend(loc="best", frameon=True, shadow=True)
+        for handle in legend.legend_handles:
+            handle.set_alpha(1.0)
+
+        plt.tight_layout()
+        plt.savefig(name, bbox_inches="tight")
+        plt.close()
 
 
 def train(
@@ -481,8 +552,10 @@ def train(
 
     print(hf_train_dataset)
     print(hf_val_dataset)
+    # 创建自定义 Trainer 类，添加损失曲线绘制功能
+
     eval_step = 100
-    trainer = transformers.Trainer(
+    trainer = LossPlottingTrainer(
         # deepspeed=deepspeed,
         model=model,
         train_dataset=hf_train_dataset,
@@ -498,10 +571,8 @@ def train(
             bf16=True,
             logging_steps=1,
             optim="adamw_torch",
-            eval_strategy="steps",
-            eval_steps=eval_step,
-            save_strategy="steps",
-            save_steps=eval_step,
+            eval_strategy="epoch",
+            save_strategy="epoch",
             output_dir=output_dir,
             save_total_limit=1,
             load_best_model_at_end=True,

@@ -6,3 +6,4 @@ pretrained-models/
 src/residual_quantization/CF/LightGCN-PyTorch/data/amazon-book__pycache__/
 *.pyc
 wandb/
+results/

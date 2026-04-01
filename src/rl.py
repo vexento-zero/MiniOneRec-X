@@ -251,10 +251,6 @@ def train(
         for i, elm in enumerate(completions):
             elm = elm.strip('\n"')
             if elm not in item_name:
-                # print("========Invalid Item========")
-                # print(f"Invalid item: {elm}")
-                # print(f"Prompt: {prompts[i]}")
-                # print("============================")
                 pred_ids.append(random.randint(0, item_num - 1))
             else:
                 pred_ids.append(item2id[elm])

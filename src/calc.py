@@ -77,9 +77,7 @@ def gao(path, item_path, output_path):
                     ALLHR[index] = ALLHR[index] + 1
         NDCGs = ALLNDCG / len(text) / (1.0 / math.log(2))
         HRs = ALLHR / len(text)
-        metric = {
-            "n_beam": n_beam
-        }
+        metric = {"n_beam": n_beam}
         for index, topk in enumerate(valid_topk):
             metric[f"NDCG@{topk}"] = round(NDCGs[index], 4)
             metric[f"HR@{topk}"] = round(HRs[index], 4)
