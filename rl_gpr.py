@@ -3,7 +3,7 @@ from trl import GRPOConfig, GRPOTrainer
 import random
 import numpy as np
 import torch
-from data import D3Dataset, SidDataset, RLTitle2SidDataset, RLSeqTitle2SidDataset, RLSid2TitleDataset, RLSidhis2TitleDataset
+from data import D3Dataset, RLHistorySid2TargetSidDataset, RLTitle2SidDataset, RLSeqTitle2SidDataset, RLSid2TitleDataset, RLSidhis2TitleDataset
 from torch.utils.data import ConcatDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
@@ -124,7 +124,7 @@ def train(
     train_datasets = []
     # train_data = D3Dataset(train_file, category=category_dict[category], sample=sample)
     # train_datasets.append(train_data)
-    train_data1 = SidDataset(train_file, category=category_dict[category], sample=sample)
+    train_data1 = RLHistorySid2TargetSidDataset(train_file, category=category_dict[category], sample=sample)
     train_datasets.append(train_data1)
     train_data2 = RLTitle2SidDataset(item_file=item_meta_path, index_file=sid_index_path, category=category_dict[category], sample=sample)
     train_datasets.append(train_data2)
@@ -140,7 +140,7 @@ def train(
     # train_datasets.append(train_data7)
     train_data = ConcatDataset(train_datasets)
     # eval_data = D3Dataset(eval_file, category=category_dict[category], sample=sample)
-    eval_data = SidDataset(eval_file, category=category_dict[category], sample=sample)
+    eval_data = RLHistorySid2TargetSidDataset(eval_file, category=category_dict[category], sample=sample)
 
     train_dataset = Dataset.from_dict({k : [elm[k] for elm in train_data] for k in train_data[0].keys()})
     train_dataset = train_dataset.shuffle(seed=seed) 

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from data import (
     D3Dataset,
-    SidDataset,
+    RLHistorySid2TargetSidDataset,
     RLTitle2SidDataset,
     RLSeqTitle2SidDataset,
     RLSid2TitleDataset,
@@ -98,7 +98,7 @@ def train(
     # train_data = D3Dataset(train_file, category=category_dict[category], sample=sample)
     # train_datasets.append(train_data)
     # * history_sids -> target_sid
-    train_data1 = SidDataset(
+    train_data1 = RLHistorySid2TargetSidDataset(
         train_file, category=category_dict[category], sample=sample
     )
     train_datasets.append(train_data1)
@@ -125,7 +125,7 @@ def train(
     # train_datasets.append(train_data7)
     train_data = ConcatDataset(train_datasets)
     # eval_data = D3Dataset(eval_file, category=category_dict[category], sample=sample)
-    eval_data = SidDataset(eval_file, category=category_dict[category], sample=sample)
+    eval_data = RLHistorySid2TargetSidDataset(eval_file, category=category_dict[category], sample=sample)
 
     train_dataset = Dataset.from_dict(
         {k: [elm[k] for elm in train_data] for k in train_data[0].keys()}

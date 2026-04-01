@@ -3,14 +3,14 @@ ROOT=/ssd/hust-tangxi/workspace/MOR
 source ${ROOT}/.venv/bin/activate
 which python
 
-export CUDA_VISIBLE_DEVICES="1"
+export CUDA_VISIBLE_DEVICES="2"
 export NCCL_IB_DISABLE=1
 
 dataset_name=Amazon-Reviews-2023
 # * Industrial_and_Scientific Office_Products All_Beauty
 domain=All_Beauty
 # * Qwen3.5-0.8B Qwen2.5-Coder-7B
-model_name=Qwen2.5-0.5B-Instruct
+model_name=Qwen2.5-3B-Instruct
 # * Qwen3-VL-Embedding-2B Qwen3-Embedding-0.6B
 embedding_model_name=Qwen3-Embedding-0.6B
 # * nocf cf
@@ -102,10 +102,10 @@ run_sft() {
         --category ${domain} \
         --train_from_scratch False \
         --seed 42 \
-        --sid_index_path ${dataset_dir}/${domain}.${sid_type}.index.json \
-        --item_meta_path ${ROOT}/data/Amazon23/${domain}/${domain}.item.json \
+        --sid_index_path ${dataset_dir}/${domain}.index.${sid_type}.json \
+        --item_meta_path ${dataset_dir}/${domain}.item.json \
         --freeze_LLM False \
-        --num_epochs 100
+        --num_epochs 10
     wait
 }
 

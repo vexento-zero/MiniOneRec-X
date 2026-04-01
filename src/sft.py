@@ -37,10 +37,10 @@ import bitsandbytes as bnb
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from data import (
     D3Dataset,
-    SFTData,
-    SidSFTDataset,
-    SidItemFeatDataset,
-    FusionSeqRecDataset,
+    SFTHistoryTitle2TargetTitleDataset,
+    SFTHistorySid2TargetSidDataset,
+    SFTSidxTilteDataset,
+    SFTHistorySid2FeatDataset,
     PreferenceSFTDataset,
     UserPreference2sidSFTDataset,
     TitleHistory2SidSFTDataset,
@@ -48,20 +48,17 @@ from data import (
 import random
 from datasets import Dataset as HFDataset
 from torch.utils.data import ConcatDataset
+from rich_logger import logger
 
 
 class TokenExtender:
-    def __init__(self, data_path, dataset, index_file=".index.json"):
+    def __init__(self, data_path):
         self.data_path = data_path
-        self.dataset = dataset
-        self.index_file = index_file
         self.indices = None
         self.new_tokens = None
 
     def _load_data(self):
-        with open(
-            os.path.join(self.data_path, self.dataset + self.index_file), "r"
-        ) as f:
+        with open(self.data_path, "r") as f:
             self.indices = json.load(f)
 
     def get_new_tokens(self):
@@ -119,6 +116,128 @@ def get_cosine_schedule_with_warmup(
         num_cycles=num_cycles,
     )
     return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def process_train_dataset(train_datasets, seed=42):
+    """
+    处理训练数据集，保持 CL_prefixes 顺序（2 > 1 > 0），组内随机重排，
+    并将其他数据集的样本随机插入到当前数据集中。
+
+    Args:
+        train_datasets: 原始数据集列表
+        seed: 随机种子
+
+    Returns:
+        HFDataset: 处理后的训练数据集
+    """
+    # 1. 分离 CL_prefixes 数据集和其他数据集
+    cl_datasets = []
+    other_datasets = []
+
+    # 前 6 个是 CL_prefixes 数据集（2个任务 × 3种前缀）
+    cl_datasets.extend(train_datasets[:6])
+    # 剩余的是其他数据集
+    other_datasets.extend(train_datasets[6:])
+
+    # 2. 分组洗牌 CL_prefixes 数据集（保持 CL_prefixes 顺序 2 > 1 > 0，组内随机）
+    shuffled_cl_datasets = []
+
+    # CL_prefixes=2 的数据集（索引 0, 3）
+    for i in range(0, 6, 3):
+        temp_dataset = HFDataset.from_dict(
+            {k: [v[k] for v in cl_datasets[i]] for k in cl_datasets[i][0].keys()}
+        )
+        temp_dataset = temp_dataset.shuffle(seed=seed)
+        shuffled_cl_datasets.append(temp_dataset)
+
+    # CL_prefixes=1 的数据集（索引 1, 4）
+    for i in range(1, 6, 3):
+        temp_dataset = HFDataset.from_dict(
+            {k: [v[k] for v in cl_datasets[i]] for k in cl_datasets[i][0].keys()}
+        )
+        temp_dataset = temp_dataset.shuffle(seed=seed)
+        shuffled_cl_datasets.append(temp_dataset)
+
+    # CL_prefixes=0 的数据集（索引 2, 5）
+    for i in range(2, 6, 3):
+        temp_dataset = HFDataset.from_dict(
+            {k: [v[k] for v in cl_datasets[i]] for k in cl_datasets[i][0].keys()}
+        )
+        temp_dataset = temp_dataset.shuffle(seed=seed)
+        shuffled_cl_datasets.append(temp_dataset)
+
+    # 合并 CL_prefixes 数据集
+    cl_combined = concatenate_datasets(shuffled_cl_datasets)
+
+    # 3. 处理其他数据集，转换为 HFDataset 并洗牌
+    shuffled_other_datasets = []
+    for dataset in other_datasets:
+        temp_dataset = HFDataset.from_dict(
+            {k: [v[k] for v in dataset] for k in dataset[0].keys()}
+        )
+        temp_dataset = temp_dataset.shuffle(seed=seed)
+        shuffled_other_datasets.append(temp_dataset)
+
+    # 合并其他数据集
+    other_combined = (
+        concatenate_datasets(shuffled_other_datasets)
+        if shuffled_other_datasets
+        else None
+    )
+
+    # 4. 将其他数据集的样本随机插入到 CL_prefixes 数据集中
+    if other_combined:
+        # 获取两个数据集的索引
+        cl_indices = list(range(len(cl_combined)))
+        other_indices = list(range(len(other_combined)))
+
+        # 随机化插入位置
+        np.random.seed(seed)
+        np.random.shuffle(other_indices)
+
+        # 创建新的数据集列表
+        combined_indices = []
+        cl_ptr = 0
+        other_ptr = 0
+
+        while cl_ptr < len(cl_indices) and other_ptr < len(other_indices):
+            # 随机决定是否插入其他数据集的样本
+            if np.random.random() < 0.5:  # 50% 概率插入
+                combined_indices.append((1, other_indices[other_ptr]))
+                other_ptr += 1
+            else:
+                combined_indices.append((0, cl_indices[cl_ptr]))
+                cl_ptr += 1
+
+        # 添加剩余的样本
+        while cl_ptr < len(cl_indices):
+            combined_indices.append((0, cl_indices[cl_ptr]))
+            cl_ptr += 1
+
+        while other_ptr < len(other_indices):
+            combined_indices.append((1, other_indices[other_ptr]))
+            other_ptr += 1
+
+        # 构建最终的数据集
+        final_data = {}
+        for key in cl_combined.features:
+            final_data[key] = []
+
+        for dtype, idx in combined_indices:
+            if dtype == 0:
+                # 来自 CL_prefixes 数据集
+                for key in cl_combined.features:
+                    final_data[key].append(cl_combined[idx][key])
+            else:
+                # 来自其他数据集
+                for key in cl_combined.features:
+                    final_data[key].append(other_combined[idx][key])
+
+        hf_train_dataset = HFDataset.from_dict(final_data)
+    else:
+        hf_train_dataset = cl_combined
+
+    return hf_train_dataset
 
 
 def train(
@@ -185,10 +304,7 @@ def train(
 
     if sid_index_path and os.path.exists(sid_index_path):
         print(f"Loading index from {sid_index_path}")
-        token_extender = TokenExtender(
-            data_path=os.path.dirname(sid_index_path),
-            dataset=os.path.basename(sid_index_path).split(".")[0],
-        )
+        token_extender = TokenExtender(data_path=sid_index_path)
         new_tokens = token_extender.get_new_tokens()
         if new_tokens:
             print(f"Adding {len(new_tokens)} new tokens to tokenizer")
@@ -232,19 +348,43 @@ def train(
         )
 
     train_datasets = []
-    # train_data1 = SFTData(train_file=train_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=sample, seed=seed, category=category)
-    # * history_sids -> target_sid
-    train_data1 = SidSFTDataset(
+    # * [课程学习] history_sids -> target_sid
+    data_historySID_to_targetSID_CL_prefixes_2 = SFTHistorySid2TargetSidDataset(
         train_file=train_file,
         tokenizer=tokenizer,
         max_len=cutoff_len,
         sample=sample,
         seed=seed,
         category=category,
+        CL_prefixes=2,
     )
-    train_datasets.append(train_data1)
+
+    data_historySID_to_targetSID_CL_prefixes_1 = SFTHistorySid2TargetSidDataset(
+        train_file=train_file,
+        tokenizer=tokenizer,
+        max_len=cutoff_len,
+        sample=sample,
+        seed=seed,
+        category=category,
+        CL_prefixes=1,
+    )
+
+    data_historySID_to_targetSID_CL_prefixes_0 = SFTHistorySid2TargetSidDataset(
+        train_file=train_file,
+        tokenizer=tokenizer,
+        max_len=cutoff_len,
+        sample=sample,
+        seed=seed,
+        category=category,
+        CL_prefixes=0,
+    )
+
+    train_datasets.append(data_historySID_to_targetSID_CL_prefixes_2)
+    train_datasets.append(data_historySID_to_targetSID_CL_prefixes_1)
+    train_datasets.append(data_historySID_to_targetSID_CL_prefixes_0)
+
     # * sid -> title, title -> sid
-    train_data2 = SidItemFeatDataset(
+    data_sidxtitle_CL_prefixes_2 = SFTSidxTilteDataset(
         item_file=item_meta_path,
         index_file=sid_index_path,
         tokenizer=tokenizer,
@@ -252,10 +392,37 @@ def train(
         sample=sample,
         seed=seed,
         category=category,
+        CL_prefixes=2,
     )
-    train_datasets.append(train_data2)
+
+    data_sidxtitle_CL_prefixes_1 = SFTSidxTilteDataset(
+        item_file=item_meta_path,
+        index_file=sid_index_path,
+        tokenizer=tokenizer,
+        max_len=cutoff_len,
+        sample=sample,
+        seed=seed,
+        category=category,
+        CL_prefixes=1,
+    )
+
+    data_sidxtitle_CL_prefixes_0 = SFTSidxTilteDataset(
+        item_file=item_meta_path,
+        index_file=sid_index_path,
+        tokenizer=tokenizer,
+        max_len=cutoff_len,
+        sample=sample,
+        seed=seed,
+        category=category,
+        CL_prefixes=0,
+    )
+
+    train_datasets.append(data_sidxtitle_CL_prefixes_2)
+    train_datasets.append(data_sidxtitle_CL_prefixes_1)
+    train_datasets.append(data_sidxtitle_CL_prefixes_0)
+
     # * history_sids -> title / description
-    train_data3 = FusionSeqRecDataset(
+    data_historySID_to_feat = SFTHistorySid2FeatDataset(
         train_file=train_file,
         item_file=item_meta_path,
         index_file=sid_index_path,
@@ -265,9 +432,11 @@ def train(
         seed=seed,
         category=category,
     )
-    train_datasets.append(train_data3)
+
+    train_datasets.append(data_historySID_to_feat)
+
     # * history_titles -> target_title
-    train_data4 = SFTData(
+    data_historyTitle_to_targetTitle = SFTHistoryTitle2TargetTitleDataset(
         train_file=train_file,
         tokenizer=tokenizer,
         max_len=cutoff_len,
@@ -275,12 +444,12 @@ def train(
         seed=seed,
         category=category,
     )
-    train_datasets.append(train_data4)
-    # train_data5 = TitleHistory2SidSFTDataset(train_file=train_file, item_file=item_meta_path, index_file=sid_index_path, tokenizer=tokenizer, max_len=cutoff_len, sample=sample, seed=seed, category=category)
-    # train_datasets.append(train_data5)
-    train_data = ConcatDataset(train_datasets)
+    train_datasets.append(data_historyTitle_to_targetTitle)
+    # 调用函数处理训练数据集
+    hf_train_dataset = process_train_dataset(train_datasets, seed=42)
+
     # * history_sids -> target_sid
-    val_data = SidSFTDataset(
+    val_data = SFTHistorySid2TargetSidDataset(
         train_file=eval_file,
         tokenizer=tokenizer,
         max_len=cutoff_len,
@@ -288,7 +457,7 @@ def train(
         seed=seed,
         category=category,
     )
-    # val_data = SFTData(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=20000, seed=seed, category=category)
+    # val_data = SFTHistoryTitle2TargetTitleDataset(train_file=eval_file, tokenizer=tokenizer, max_len=cutoff_len,  sample=20000, seed=seed, category=category)
     print("LOAD DATA FINISHED")
 
     if resume_from_checkpoint:
@@ -303,16 +472,12 @@ def train(
     model.gradient_checkpointing_enable()
 
     sample_frac = 1
-    hf_train_dataset = HFDataset.from_dict(
-        {k: [v[k] for v in train_data] for k in train_data[0].keys()}
-    )
-    hf_train_dataset = hf_train_dataset.shuffle(seed=42).select(
+    hf_train_dataset = hf_train_dataset.select(
         range(int(sample_frac * len(hf_train_dataset)))
     )
     hf_val_dataset = HFDataset.from_dict(
         {k: [v[k] for v in val_data] for k in val_data[0].keys()}
-    ).shuffle(seed=seed)
-    hf_val_dataset = hf_val_dataset.shuffle(seed=42)
+    )
 
     print(hf_train_dataset)
     print(hf_val_dataset)

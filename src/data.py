@@ -10,6 +10,7 @@ import os
 import copy
 import time
 import torch.nn.functional as F
+from rich_logger import logger
 
 
 class Tokenizer:
@@ -142,7 +143,7 @@ class JSONBaseDataset(BaseDataset):
             self.indices = json.load(f)
 
 
-class SFTData(CSVBaseDataset):
+class SFTHistoryTitle2TargetTitleDataset(CSVBaseDataset):
     def __init__(
         self,
         train_file,
@@ -419,64 +420,7 @@ class EvalD3Dataset(CSVBaseDataset):
         }
 
 
-class SidDataset(CSVBaseDataset):
-    def __init__(
-        self, train_file, max_len=2048, sample=-1, seed=0, category="", dedup=False
-    ):
-        super().__init__(
-            train_file,
-            sample,
-            seed,
-            max_len,
-            category,
-            dedup,
-            tokenizer=None,
-            test=False,
-        )
-
-        self.prompt2history = {}
-        self.history2target = {}
-        self.get_inputs()
-
-    def get_history(self, row):
-        row["history_item_sid"] = eval(row["history_item_sid"])
-        L = len(row["history_item_sid"])
-        history = ""
-        history_str = "::".join(row["history_item_sid"])
-        for i in range(L):
-            if i == 0:
-                history += row["history_item_sid"][i]
-            else:
-                history += ", " + row["history_item_sid"][i]
-        target_item = str(row["item_sid"])
-        target_item_sid = row["item_sid"]
-        last_history_item_sid = (
-            row["history_item_sid"][-1] if row["history_item_sid"] else None
-        )
-        return {
-            "input": f"The user has interacted with items {history} in chronological order. Can you predict the next possible item that the user may expect?",
-            # Analyze user preferences and then predict the semantic ID of the next item.
-            "output": target_item + "\n",
-            "history_str": history_str,
-            "dedup": target_item_sid == last_history_item_sid,
-        }
-
-    def pre(self, idx):
-        history = self.get_history(self.data.iloc[idx])
-        target_item = history["output"]
-        history["output"] = ""
-
-        prompt = self.generate_prompt(history)
-        self.prompt2history[prompt] = history["history_str"]
-        self.history2target[history["history_str"]] = target_item
-
-        return {
-            "prompt": prompt,
-            "completion": target_item,
-        }
-
-
-class SidSFTDataset(CSVBaseDataset):
+class SFTHistorySid2TargetSidDataset(CSVBaseDataset):
     def __init__(
         self,
         train_file,
@@ -488,11 +432,13 @@ class SidSFTDataset(CSVBaseDataset):
         category="",
         K=4,
         dedup=False,
+        CL_prefixes: int = 0,
     ):
         super().__init__(
             train_file, sample, seed, max_len, category, dedup, tokenizer, test
         )
 
+        self.CL_prefixes = CL_prefixes
         self.get_inputs()
 
     def get_history(self, row):
@@ -512,7 +458,7 @@ class SidSFTDataset(CSVBaseDataset):
         )
         return {
             "input": f"The user has interacted with items {history} in chronological order. Can you predict the next possible item that the user may expect?",
-            "output": target_item + "\n",
+            "output": target_item,
             "history_str": history_str,
             "dedup": target_item_sid == last_history_item_sid,
         }
@@ -550,7 +496,9 @@ Can you predict the next possible item that the user may expect?
             }
 
         golden_tokens = self.tokenizer.encode(target_item, bos=False, eos=True)
-        input_prompt_len = len(tokens)
+        assert 3 <= len(golden_tokens) <= 4
+        assert self.CL_prefixes <= len(golden_tokens) - 1
+        input_prompt_len = len(tokens) + self.CL_prefixes
         tokens = tokens + golden_tokens
         attention_mask = [1] * len(tokens)
         labels = [-100] * input_prompt_len + tokens[input_prompt_len:]
@@ -798,7 +746,7 @@ Can you predict the next possible item that the user may expect?
         }
 
 
-class SidItemFeatDataset(JSONBaseDataset):
+class SFTSidxTilteDataset(JSONBaseDataset):
     def __init__(
         self,
         item_file,
@@ -809,6 +757,7 @@ class SidItemFeatDataset(JSONBaseDataset):
         test=False,
         seed=0,
         category="",
+        CL_prefixes: int = 0,
     ):
         """
         Dataset for sid2title and title2sid tasks.
@@ -837,6 +786,7 @@ class SidItemFeatDataset(JSONBaseDataset):
         # Build sid2title and title2sid mappings
         self.sid2title = {}
         self.title2sid = {}
+        self.CL_prefixes = CL_prefixes
 
         for item_id, sids in self.indices.items():
             if item_id in self.item_feat:
@@ -902,7 +852,244 @@ Answer the question about item identification.
                 "attention_mask": attention_mask,
             }
 
-        target = data_point["output"] + "\n"
+        target = data_point["output"]
+
+        golden_tokens = self.tokenizer.encode(target, bos=False, eos=True)
+        if data_point["task"] == "title2sid":
+            assert (
+                3 <= len(golden_tokens) <= 4
+            ), f"target = {target}, golden_tokens = {golden_tokens}"
+            assert self.CL_prefixes <= len(golden_tokens) - 1
+            input_prompt_len = len(tokens) + self.CL_prefixes
+        else:
+            input_prompt_len = len(tokens)
+        tokens = tokens + golden_tokens
+        attention_mask = [1] * len(tokens)
+        labels = [-100] * input_prompt_len + tokens[input_prompt_len:]
+
+        if len(tokens) >= self.max_len:
+            print(f"Sequence length {len(tokens)} exceeds max_len {self.max_len}")
+
+        return {
+            "input_ids": tokens[-self.max_len :],
+            "attention_mask": attention_mask[-self.max_len :],
+            "labels": labels[-self.max_len :],
+        }
+
+
+class SFTHistorySid2FeatDataset(BaseDataset):
+    def __init__(
+        self,
+        train_file,
+        item_file,
+        index_file,
+        tokenizer,
+        max_len=2048,
+        sample=-1,
+        test=False,
+        seed=0,
+        category="",
+        dedup=False,
+    ):
+        """
+        Fusion dataset combining sequence recommendation with item features.
+        Uses semantic IDs for user history, outputs item titles or descriptions.
+
+        Args:
+            train_file: Path to CSV file with sequence data
+            item_file: Path to .item.json file with item features
+            index_file: Path to .index.json file with item indices
+            tokenizer: Tokenizer for encoding text
+            max_len: Maximum sequence length
+            sample: Number of samples to use (-1 for all)
+            test: Whether this is test mode
+            seed: Random seed
+            category: Category name for prompts
+            dedup: Whether to filter duplicate items
+        """
+        BaseDataset.__init__(self, tokenizer, max_len, test, category, dedup, seed)
+
+        # Initialize CSV part
+        self.data = pd.read_csv(train_file)
+        if sample > 0:
+            self.data = self.data.sample(sample, random_state=seed)
+
+        # Initialize JSON part
+        with open(item_file, "r") as f:
+            self.item_feat = json.load(f)
+        with open(index_file, "r") as f:
+            self.indices = json.load(f)
+
+        # Build sid2title and sid2description mappings
+        self.sid2title = {}
+        self.sid2description = {}
+
+        for item_id, sids in self.indices.items():
+            if item_id in self.item_feat:
+                title = self.item_feat[item_id]["title"]
+                description = self.item_feat[item_id]["description"]
+
+                # Process description according to requirements:
+                # 1. If description is empty, use title
+                # 2. If description is a list, select the longest one
+                # 3. If the longest in list is also empty, use title
+                processed_description = self._process_description(description, title)
+
+                # Concatenate all three semantic IDs as the key
+                if len(sids) >= 3:
+                    combined_sid = sids[0] + sids[1] + sids[2]
+                    self.sid2title[combined_sid] = title
+                    self.sid2description[combined_sid] = processed_description
+        # print("self.sid2title: ", self.sid2title)
+        # print("self.sid2description: ", self.sid2description)
+        self.get_inputs()
+
+    def _process_description(self, description, title):
+        """
+        Process description according to the requirements:
+        1. If description is empty, use title
+        2. If description is a list, select the longest one
+        3. If the longest in list is also empty, use title
+
+        Args:
+            description: The description field from item_feat
+            title: The title field from item_feat
+
+        Returns:
+            str: Processed description
+        """
+        # Check if description is empty or None
+        if not description or description == "":
+            return title
+
+        # Check if description is a list (either actual list or string representation)
+        if isinstance(description, list):
+            # It's already a list
+            desc_list = description
+        elif (
+            isinstance(description, str)
+            and description.startswith("[")
+            and description.endswith("]")
+        ):
+            try:
+                # Try to parse string representation of list
+                desc_list = eval(description)
+            except:
+                # If parsing fails, treat as regular string
+                return description if description.strip() else title
+        else:
+            # Regular string description
+            return description if description.strip() else title
+
+        # If we have a list, find the longest non-empty item
+        if desc_list:
+            # Filter out empty strings and find the longest
+            non_empty_descriptions = [
+                desc for desc in desc_list if desc and desc.strip()
+            ]
+            if non_empty_descriptions:
+                # Return the longest description
+                longest_desc = max(non_empty_descriptions, key=len)
+                return longest_desc
+            else:
+                # All descriptions in list are empty, use title
+                return title
+        else:
+            # Empty list, use title
+            return title
+
+    def generate_prompt_title(self, history):
+        return f"The user has sequentially interacted with items {history}. Can you recommend the next item for him? Tell me the title of the item"
+
+    def generate_prompt_description(self, history):
+        return f"Please review the user's historical interactions: {history}, and describe what kind of item he still needs."
+
+    def get_history(self, row):
+        history_item_sid = eval(row["history_item_sid"])
+        history_str = ", ".join(history_item_sid)
+
+        target_sid = row["item_sid"]
+
+        # Use the new sid2title and sid2description mappings
+        if target_sid in self.sid2title:
+            target_title = self.sid2title[target_sid]
+        else:
+            target_title = target_sid
+
+        if target_sid in self.sid2description:
+            target_description = self.sid2description[target_sid]
+            # Clean description if it's a string representation of a list
+            if (
+                isinstance(target_description, str)
+                and target_description.startswith("['")
+                and target_description.endswith("']")
+            ):
+                try:
+                    desc_list = eval(target_description)
+                    target_description = (
+                        desc_list[0] if desc_list else target_description
+                    )
+                except:
+                    pass  # Keep original if eval fails
+        else:
+            target_description = f"An item with semantic ID {target_sid}"
+
+        # Check for deduplication
+        last_history_sid = history_item_sid[-1] if history_item_sid else None
+        is_duplicate = target_sid == last_history_sid
+
+        return {
+            "history_str": history_str,
+            "target_title": target_title,
+            "target_description": target_description,
+            "target_sid": target_sid,
+            "dedup": is_duplicate,
+        }
+
+    def generate_formatted_prompt(self, prompt, response):
+        return f"""### User Input: 
+{prompt}
+
+### Response:\n"""
+
+    def pre(self, idx):
+        instruction = """Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request. 
+
+### Instruction:
+Can you recommend the next item for the user based on their interaction history?
+
+"""
+        tokens = self.tokenizer.encode(instruction, bos=True, eos=False)
+
+        history_data = self.get_history(self.data.iloc[idx])
+
+        # Skip if duplicate and dedup is enabled
+        if self.dedup and history_data["dedup"]:
+            return None
+
+        # Randomly choose between title and description tasks
+        """if random.random() < 0.5:
+            # Title task
+            prompt = self.generate_prompt_title(history_data['history_str'])
+            target = history_data['target_title'] + '\n'
+        else:
+            # Description task
+            prompt = self.generate_prompt_description(history_data['history_str'])
+            target = history_data['target_description'] + '\n'
+        """
+        prompt = self.generate_prompt_title(history_data["history_str"])
+        target = history_data["target_title"] + "\n"
+        # print("fusion prompt: ", prompt)
+
+        formatted_prompt = self.generate_formatted_prompt(prompt, "")
+        tokens = tokens + self.tokenizer.encode(formatted_prompt, bos=False, eos=False)
+        attention_mask = [1] * len(tokens)
+
+        if self.test:
+            return {
+                "input_ids": tokens,
+                "attention_mask": attention_mask,
+            }
 
         golden_tokens = self.tokenizer.encode(target, bos=False, eos=True)
         input_prompt_len = len(tokens)
@@ -917,6 +1104,63 @@ Answer the question about item identification.
             "input_ids": tokens[-self.max_len :],
             "attention_mask": attention_mask[-self.max_len :],
             "labels": labels[-self.max_len :],
+        }
+
+
+class RLHistorySid2TargetSidDataset(CSVBaseDataset):
+    def __init__(
+        self, train_file, max_len=2048, sample=-1, seed=0, category="", dedup=False
+    ):
+        super().__init__(
+            train_file,
+            sample,
+            seed,
+            max_len,
+            category,
+            dedup,
+            tokenizer=None,
+            test=False,
+        )
+
+        self.prompt2history = {}
+        self.history2target = {}
+        self.get_inputs()
+
+    def get_history(self, row):
+        row["history_item_sid"] = eval(row["history_item_sid"])
+        L = len(row["history_item_sid"])
+        history = ""
+        history_str = "::".join(row["history_item_sid"])
+        for i in range(L):
+            if i == 0:
+                history += row["history_item_sid"][i]
+            else:
+                history += ", " + row["history_item_sid"][i]
+        target_item = str(row["item_sid"])
+        target_item_sid = row["item_sid"]
+        last_history_item_sid = (
+            row["history_item_sid"][-1] if row["history_item_sid"] else None
+        )
+        return {
+            "input": f"The user has interacted with items {history} in chronological order. Can you predict the next possible item that the user may expect?",
+            # Analyze user preferences and then predict the semantic ID of the next item.
+            "output": target_item + "\n",
+            "history_str": history_str,
+            "dedup": target_item_sid == last_history_item_sid,
+        }
+
+    def pre(self, idx):
+        history = self.get_history(self.data.iloc[idx])
+        target_item = history["output"]
+        history["output"] = ""
+
+        prompt = self.generate_prompt(history)
+        self.prompt2history[prompt] = history["history_str"]
+        self.history2target[history["history_str"]] = target_item
+
+        return {
+            "prompt": prompt,
+            "completion": target_item,
         }
 
 
@@ -1292,236 +1536,6 @@ class RLSidhis2TitleDataset(BaseDataset):
         return {
             "prompt": prompt,
             "completion": target_item,
-        }
-
-
-class FusionSeqRecDataset(BaseDataset):
-    def __init__(
-        self,
-        train_file,
-        item_file,
-        index_file,
-        tokenizer,
-        max_len=2048,
-        sample=-1,
-        test=False,
-        seed=0,
-        category="",
-        dedup=False,
-    ):
-        """
-        Fusion dataset combining sequence recommendation with item features.
-        Uses semantic IDs for user history, outputs item titles or descriptions.
-
-        Args:
-            train_file: Path to CSV file with sequence data
-            item_file: Path to .item.json file with item features
-            index_file: Path to .index.json file with item indices
-            tokenizer: Tokenizer for encoding text
-            max_len: Maximum sequence length
-            sample: Number of samples to use (-1 for all)
-            test: Whether this is test mode
-            seed: Random seed
-            category: Category name for prompts
-            dedup: Whether to filter duplicate items
-        """
-        BaseDataset.__init__(self, tokenizer, max_len, test, category, dedup, seed)
-
-        # Initialize CSV part
-        self.data = pd.read_csv(train_file)
-        if sample > 0:
-            self.data = self.data.sample(sample, random_state=seed)
-
-        # Initialize JSON part
-        with open(item_file, "r") as f:
-            self.item_feat = json.load(f)
-        with open(index_file, "r") as f:
-            self.indices = json.load(f)
-
-        # Build sid2title and sid2description mappings
-        self.sid2title = {}
-        self.sid2description = {}
-
-        for item_id, sids in self.indices.items():
-            if item_id in self.item_feat:
-                title = self.item_feat[item_id]["title"]
-                description = self.item_feat[item_id]["description"]
-
-                # Process description according to requirements:
-                # 1. If description is empty, use title
-                # 2. If description is a list, select the longest one
-                # 3. If the longest in list is also empty, use title
-                processed_description = self._process_description(description, title)
-
-                # Concatenate all three semantic IDs as the key
-                if len(sids) >= 3:
-                    combined_sid = sids[0] + sids[1] + sids[2]
-                    self.sid2title[combined_sid] = title
-                    self.sid2description[combined_sid] = processed_description
-        # print("self.sid2title: ", self.sid2title)
-        # print("self.sid2description: ", self.sid2description)
-        self.get_inputs()
-
-    def _process_description(self, description, title):
-        """
-        Process description according to the requirements:
-        1. If description is empty, use title
-        2. If description is a list, select the longest one
-        3. If the longest in list is also empty, use title
-
-        Args:
-            description: The description field from item_feat
-            title: The title field from item_feat
-
-        Returns:
-            str: Processed description
-        """
-        # Check if description is empty or None
-        if not description or description == "":
-            return title
-
-        # Check if description is a list (either actual list or string representation)
-        if isinstance(description, list):
-            # It's already a list
-            desc_list = description
-        elif (
-            isinstance(description, str)
-            and description.startswith("[")
-            and description.endswith("]")
-        ):
-            try:
-                # Try to parse string representation of list
-                desc_list = eval(description)
-            except:
-                # If parsing fails, treat as regular string
-                return description if description.strip() else title
-        else:
-            # Regular string description
-            return description if description.strip() else title
-
-        # If we have a list, find the longest non-empty item
-        if desc_list:
-            # Filter out empty strings and find the longest
-            non_empty_descriptions = [
-                desc for desc in desc_list if desc and desc.strip()
-            ]
-            if non_empty_descriptions:
-                # Return the longest description
-                longest_desc = max(non_empty_descriptions, key=len)
-                return longest_desc
-            else:
-                # All descriptions in list are empty, use title
-                return title
-        else:
-            # Empty list, use title
-            return title
-
-    def generate_prompt_title(self, history):
-        return f"The user has sequentially interacted with items {history}. Can you recommend the next item for him? Tell me the title of the item"
-
-    def generate_prompt_description(self, history):
-        return f"Please review the user's historical interactions: {history}, and describe what kind of item he still needs."
-
-    def get_history(self, row):
-        history_item_sid = eval(row["history_item_sid"])
-        history_str = ", ".join(history_item_sid)
-
-        target_sid = row["item_sid"]
-
-        # Use the new sid2title and sid2description mappings
-        if target_sid in self.sid2title:
-            target_title = self.sid2title[target_sid]
-        else:
-            target_title = target_sid
-
-        if target_sid in self.sid2description:
-            target_description = self.sid2description[target_sid]
-            # Clean description if it's a string representation of a list
-            if (
-                isinstance(target_description, str)
-                and target_description.startswith("['")
-                and target_description.endswith("']")
-            ):
-                try:
-                    desc_list = eval(target_description)
-                    target_description = (
-                        desc_list[0] if desc_list else target_description
-                    )
-                except:
-                    pass  # Keep original if eval fails
-        else:
-            target_description = f"An item with semantic ID {target_sid}"
-
-        # Check for deduplication
-        last_history_sid = history_item_sid[-1] if history_item_sid else None
-        is_duplicate = target_sid == last_history_sid
-
-        return {
-            "history_str": history_str,
-            "target_title": target_title,
-            "target_description": target_description,
-            "target_sid": target_sid,
-            "dedup": is_duplicate,
-        }
-
-    def generate_formatted_prompt(self, prompt, response):
-        return f"""### User Input: 
-{prompt}
-
-### Response:\n"""
-
-    def pre(self, idx):
-        instruction = """Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request. 
-
-### Instruction:
-Can you recommend the next item for the user based on their interaction history?
-
-"""
-        tokens = self.tokenizer.encode(instruction, bos=True, eos=False)
-
-        history_data = self.get_history(self.data.iloc[idx])
-
-        # Skip if duplicate and dedup is enabled
-        if self.dedup and history_data["dedup"]:
-            return None
-
-        # Randomly choose between title and description tasks
-        """if random.random() < 0.5:
-            # Title task
-            prompt = self.generate_prompt_title(history_data['history_str'])
-            target = history_data['target_title'] + '\n'
-        else:
-            # Description task
-            prompt = self.generate_prompt_description(history_data['history_str'])
-            target = history_data['target_description'] + '\n'
-        """
-        prompt = self.generate_prompt_title(history_data["history_str"])
-        target = history_data["target_title"] + "\n"
-        # print("fusion prompt: ", prompt)
-
-        formatted_prompt = self.generate_formatted_prompt(prompt, "")
-        tokens = tokens + self.tokenizer.encode(formatted_prompt, bos=False, eos=False)
-        attention_mask = [1] * len(tokens)
-
-        if self.test:
-            return {
-                "input_ids": tokens,
-                "attention_mask": attention_mask,
-            }
-
-        golden_tokens = self.tokenizer.encode(target, bos=False, eos=True)
-        input_prompt_len = len(tokens)
-        tokens = tokens + golden_tokens
-        attention_mask = [1] * len(tokens)
-        labels = [-100] * input_prompt_len + tokens[input_prompt_len:]
-
-        if len(tokens) >= self.max_len:
-            print(f"Sequence length {len(tokens)} exceeds max_len {self.max_len}")
-
-        return {
-            "input_ids": tokens[-self.max_len :],
-            "attention_mask": attention_mask[-self.max_len :],
-            "labels": labels[-self.max_len :],
         }
 
 
